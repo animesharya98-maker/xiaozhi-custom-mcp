@@ -1,42 +1,45 @@
-import os
-import asyncio
+import urllib.request
+import urllib.parse
+import json
 from mcp.server.fastmcp import FastMCP
-import yt_dlp
-from duckduckgo_search import DDGS
 
-mcp = FastMCP("CustomMusicAndSearch")
+mcp = FastMCP("IndianWebSearch")
 
 @mcp.tool()
 def search_web(query: str) -> str:
-    """Search the internet for places, news, facts, or general information."""
-    try:
-        results = DDGS().text(query, max_results=3)
-        if not results:
-            return "No results found."
-        summary = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
-        return summary
-    except Exception as e:
-        return f"Search error: {str(e)}"
+    """Search the internet for Indian schools, places, news, singers, or facts."""
+    results_list = []
+    encoded = urllib.parse.quote(query)
 
-@mcp.tool()
-def play_youtube_music(song_name: str) -> str:
-    """Search a song on YouTube and get its direct playable audio stream URL."""
-    ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'noplaylist': True,
-        'quiet': True,
-        'default_search': 'ytsearch1'
-    }
+    # 1. Wikipedia Search API (Fast & Reliable)
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(song_name, download=False)
-            if 'entries' in info:
-                info = info['entries'][0]
-            title = info.get('title', song_name)
-            audio_url = info.get('url', '')
-            return f"Song Found: {title}\nAudio Stream URL: {audio_url}\nInstruction: Play this audio URL directly on the device."
-    except Exception as e:
-        return f"Could not fetch song: {str(e)}"
+        wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded}&format=json&utf8=1"
+        req = urllib.request.Request(wiki_url, headers={'User-Agent': 'XiaozhiAssistant/1.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            wiki_data = json.loads(resp.read().decode('utf-8'))
+            for item in wiki_data.get("query", {}).get("search", [])[:3]:
+                snippet = item['snippet'].replace('<span class="searchmatch">', '').replace('</span>', '')
+                results_list.append(f"- Wikipedia ({item['title']}): {snippet}")
+    except Exception:
+        pass
+
+    # 2. DuckDuckGo Instant Answer API (Zero dependency)
+    try:
+        ddg_url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
+        req = urllib.request.Request(ddg_url, headers={'User-Agent': 'XiaozhiAssistant/1.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            ddg_data = json.loads(resp.read().decode('utf-8'))
+            if ddg_data.get("AbstractText"):
+                results_list.append(f"- Summary: {ddg_data['AbstractText']}")
+            for topic in ddg_data.get("RelatedTopics", [])[:3]:
+                if isinstance(topic, dict) and topic.get("Text"):
+                    results_list.append(f"- Info: {topic['Text']}")
+    except Exception:
+        pass
+
+    if not results_list:
+        return "No exact information found on Wikipedia or DuckDuckGo for this query."
+    return "\n".join(results_list)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
