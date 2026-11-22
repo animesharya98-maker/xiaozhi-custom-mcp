@@ -3,8 +3,24 @@ import websockets
 import subprocess
 import sys
 import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 MCP_ENDPOINT = os.environ.get("MCP_ENDPOINT")
+
+# Render Web Service ko active rakhne ke liye dummy port
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Xiaozhi MCP Bridge is Running!")
+    def log_message(self, format, *args):
+        pass
+
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 async def pipe_stdio_to_ws(ws, process):
     async def read_stdout():
@@ -42,4 +58,5 @@ async def main():
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
+    threading.Thread(target=start_dummy_server, daemon=True).start()
     asyncio.run(main())
