@@ -1,62 +1,50 @@
-import asyncio
-import websockets
-import subprocess
-import sys
-import os
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
+import urllib.request
+import urllib.parse
+import json
+from mcp.server.fastmcp import FastMCP
+from duckduckgo_search import DDGS
 
-MCP_ENDPOINT = os.environ.get("MCP_ENDPOINT")
+mcp = FastMCP("CustomMusicAndSearch")
 
-# Render Web Service ko active rakhne ke liye dummy port
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Xiaozhi MCP Bridge is Running!")
-    def log_message(self, format, *args):
-        pass
+@mcp.tool()
+def search_web(query: str) -> str:
+    """Search the internet for places, news, facts, or general information."""
+    try:
+        results = DDGS().text(query, max_results=3)
+        if not results:
+            return "No results found."
+        summary = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
+        return summary
+    except Exception as e:
+        return f"Search error: {str(e)}"
 
-def start_dummy_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
-
-async def pipe_stdio_to_ws(ws, process):
-    async def read_stdout():
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            await ws.send(line.decode('utf-8'))
-
-    async def write_stdin():
-        async for message in ws:
-            if isinstance(message, str):
-                process.stdin.write((message + "\n").encode('utf-8'))
-                await process.stdin.drain()
-
-    await asyncio.gather(read_stdout(), write_stdin())
-
-async def main():
-    if not MCP_ENDPOINT:
-        print("Error: MCP_ENDPOINT environment variable is missing.")
-        sys.exit(1)
-    while True:
-        try:
-            async with websockets.connect(MCP_ENDPOINT) as ws:
-                print("Connected to Xiaozhi MCP Endpoint!")
-                process = await asyncio.create_subprocess_exec(
-                    sys.executable, sys.argv[1],
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=sys.stderr
-                )
-                await pipe_stdio_to_ws(ws, process)
-        except Exception as e:
-            print(f"Connection lost: {e}. Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
+@mcp.tool()
+def play_music(song_name: str) -> str:
+    """Search Indian, Punjabi, Bollywood, or English songs and get direct MP3 audio link."""
+    try:
+        encoded_query = urllib.parse.quote(song_name)
+        api_url = f"https://saavn.dev/api/search/songs?query={encoded_query}&limit=1"
+        req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            results = data.get("data", {}).get("results", [])
+            if not results:
+                return f"Could not find any song matching {song_name}."
+            
+            song = results[0]
+            title = song.get("name", song_name)
+            artists = song.get("artists", {}).get("primary", [])
+            artist_name = artists[0].get("name", "Unknown") if artists else "Unknown"
+            
+            download_urls = song.get("downloadUrl", [])
+            if not download_urls:
+                return "Audio stream link not available for this song."
+            
+            # 96kbps ya 160kbps MP3 chunein jo ESP32 par smoothly chale
+            mp3_url = download_urls[1]["url"] if len(download_urls) > 1 else download_urls[0]["url"]
+            return f"Song: {title} by {artist_name}\nPlayable MP3 URL: {mp3_url}\nTell the user you are playing {title} and stream this MP3 URL."
+    except Exception as e:
+        return f"Music fetch error: {str(e)}"
 
 if __name__ == "__main__":
-    threading.Thread(target=start_dummy_server, daemon=True).start()
-    asyncio.run(main())
+    mcp.run(transport="stdio")
