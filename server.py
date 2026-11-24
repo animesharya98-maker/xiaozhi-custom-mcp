@@ -1,127 +1,151 @@
-import asyncio
-import json
 import os
-import sys
-import threading
-import urllib.parse
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import websockets
+import json
+import asyncio
+import tempfile
+import subprocess
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from openai import AsyncOpenAI
+from duckduckgo_search import DDGS
+import yt_dlp
 
-MCP_ENDPOINT = os.environ.get("MCP_ENDPOINT")
+app = FastAPI()
+client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Xiaozhi MCP Server is Live!")
-    def log_message(self, format, *args):
-        pass
-
-def start_dummy_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+@app.get("/")
+async def root():
+    return {"status": "Louis Max Brain Online", "ws_endpoint": "/ws"}
 
 def search_web(query: str) -> str:
-    results_list = []
-    encoded = urllib.parse.quote(query)
-
-    # 1. Wikipedia Search
     try:
-        wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded}&format=json&utf8=1"
-        req = urllib.request.Request(wiki_url, headers={'User-Agent': 'XiaozhiBot/1.0'})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            wiki_data = json.loads(resp.read().decode('utf-8'))
-            for item in wiki_data.get("query", {}).get("search", [])[:3]:
-                snippet = item['snippet'].replace('<span class="searchmatch">', '').replace('</span>', '')
-                results_list.append(f"- Wikipedia ({item['title']}): {snippet}")
-    except Exception:
-        pass
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+            if not results:
+                return "No search results found."
+            return "\n".join([f"{r['title']}: {r['body']}" for r in results])
+    except Exception as e:
+        return f"Search error: {str(e)}"
 
-    # 2. DuckDuckGo Instant API
+def get_song_pcm(song_query: str) -> bytes:
     try:
-        ddg_url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
-        req = urllib.request.Request(ddg_url, headers={'User-Agent': 'XiaozhiBot/1.0'})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            ddg_data = json.loads(resp.read().decode('utf-8'))
-            if ddg_data.get("AbstractText"):
-                results_list.append(f"- Summary: {ddg_data['AbstractText']}")
-            for topic in ddg_data.get("RelatedTopics", [])[:3]:
-                if isinstance(topic, dict) and topic.get("Text"):
-                    results_list.append(f"- Info: {topic['Text']}")
-    except Exception:
-        pass
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            "default_search": "ytsearch1",
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(song_query, download=False)
+            if "entries" in info:
+                info = info["entries"][0]
+            audio_url = info["url"]
 
-    if not results_list:
-        return "No exact information found on Wikipedia or DuckDuckGo for this query."
-    return "\n".join(results_list)
+        # Convert first 30 seconds to 16kHz 16-bit Mono PCM for ESP32 MAX98357A
+        cmd = [
+            "ffmpeg", "-i", audio_url,
+            "-t", "30",
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ar", "16000", "-ac", "1", "pipe:1"
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        return proc.stdout
+    except Exception as e:
+        print("Music error:", e)
+        return b""
 
-async def handle_mcp():
-    if not MCP_ENDPOINT:
-        print("Error: MCP_ENDPOINT is missing!")
-        sys.exit(1)
+async def text_to_pcm(text: str) -> bytes:
+    speech = await client.audio.speech.create(
+        model="tts-1",
+        voice="onyx",
+        input=text,
+        response_format="pcm"  # 24kHz 16-bit mono raw PCM
+    )
+    raw_24k = speech.read()
+    # Resample 24kHz -> 16kHz via ffmpeg for ESP32 speaker
+    cmd = [
+        "ffmpeg", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0",
+        "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"
+    ]
+    proc = subprocess.run(cmd, input=raw_24k, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return proc.stdout
 
-    while True:
-        try:
-            async with websockets.connect(MCP_ENDPOINT) as ws:
-                print("Connected to Xiaozhi MCP Endpoint!")
-                async for raw_msg in ws:
-                    msg = json.loads(raw_msg)
-                    msg_id = msg.get("id")
-                    method = msg.get("method")
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    print("ESP32 Louis Max Connected!")
+    await ws.send_text(json.dumps({"status": "Online! Listening..."}))
 
-                    if method == "initialize":
-                        resp = {
-                            "jsonrpc": "2.0",
-                            "id": msg_id,
-                            "result": {
-                                "protocolVersion": "2024-11-05",
-                                "capabilities": {"tools": {}},
-                                "serverInfo": {"name": "IndianWebSearch", "version": "1.0"}
-                            }
-                        }
-                        await ws.send(json.dumps(resp))
+    try:
+        while True:
+            wav_bytes = await ws.receive_bytes()
+            await ws.send_text(json.dumps({"status": "Thinking..."}))
 
-                    elif method == "tools/list":
-                        resp = {
-                            "jsonrpc": "2.0",
-                            "id": msg_id,
-                            "result": {
-                                "tools": [
-                                    {
-                                        "name": "search_web",
-                                        "description": "Search the internet for Indian schools, places, news, singers, or facts.",
-                                        "inputSchema": {
-                                            "type": "object",
-                                            "properties": {
-                                                "query": {"type": "string", "description": "Search query"}
-                                            },
-                                            "required": ["query"]
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                        await ws.send(json.dumps(resp))
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(wav_bytes)
+                tmp_path = tmp.name
 
-                    elif method == "tools/call":
-                        args = msg.get("params", {}).get("arguments", {})
-                        query = args.get("query", "")
-                        output = await asyncio.to_thread(search_web, query)
-                        resp = {
-                            "jsonrpc": "2.0",
-                            "id": msg_id,
-                            "result": {
-                                "content": [{"type": "text", "text": output}]
-                            }
-                        }
-                        await ws.send(json.dumps(resp))
+            with open(tmp_path, "rb") as audio_file:
+                transcript = await client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file
+                )
+            os.remove(tmp_path)
+            user_text = transcript.text.strip()
+            print("User said:", user_text)
 
-        except Exception as e:
-            print(f"Reconnecting in 5s due to: {e}")
-            await asyncio.sleep(5)
+            if not user_text:
+                await ws.send_text(json.dumps({"status": "Online! Listening..."}))
+                continue
 
-if __name__ == "__main__":
-    threading.Thread(target=start_dummy_server, daemon=True).start()
-    asyncio.run(handle_mcp())
+            lower_text = user_text.lower()
+            # Volume control
+            if "volume" in lower_text:
+                vol = 1.0 if ("full" in lower_text or "max" in lower_text or "100" in lower_text) else (0.3 if "low" in lower_text else 0.7)
+                await ws.send_text(json.dumps({"volume": vol}))
+                reply = f"Volume set to {int(vol * 100)} percent."
+                pcm = await text_to_pcm(reply)
+                await ws.send_bytes(pcm)
+                await ws.send_text(json.dumps({"status": "Online! Listening..."}))
+                continue
+
+            # Music playback
+            if any(k in lower_text for k in ["play ", "song", "gaana", "music"]):
+                await ws.send_text(json.dumps({"status": "Loading Song..."}))
+                pcm_song = await asyncio.to_thread(get_song_pcm, user_text)
+                if pcm_song:
+                    await ws.send_text(json.dumps({"status": "Playing Music..."}))
+                    for i in range(0, len(pcm_song), 4096):
+                        await ws.send_bytes(pcm_song[i:i+4096])
+                        await asyncio.sleep(0.08)
+                else:
+                    pcm = await text_to_pcm("Sorry, I could not load that song right now.")
+                    await ws.send_bytes(pcm)
+                await ws.send_text(json.dumps({"status": "Online! Listening..."}))
+                continue
+
+            # Web search + AI answer
+            context = ""
+            if any(k in lower_text for k in ["search", "news", "weather", "latest", "who is", "what is", "score", "price", "today", "aaj", "kya hai"]):
+                await ws.send_text(json.dumps({"status": "Searching Web..."}))
+                context = await asyncio.to_thread(search_web, user_text)
+
+            messages = [
+                {"role": "system", "content": "You are Louis Max, a helpful, witty voice AI assistant running on an ESP32 hardware device. Keep answers concise (2-3 short sentences) suitable for spoken voice output."},
+                {"role": "user", "content": f"User query: {user_text}\nWeb context (if any): {context}"}
+            ]
+            completion = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages
+            )
+            reply_text = completion.choices[0].message.content
+            print("Louis Max:", reply_text)
+
+            await ws.send_text(json.dumps({"status": "Speaking..."}))
+            pcm_reply = await text_to_pcm(reply_text)
+            for i in range(0, len(pcm_reply), 4096):
+                await ws.send_bytes(pcm_reply[i:i+4096])
+                await asyncio.sleep(0.08)
+
+            await ws.send_text(json.dumps({"status": "Online! Listening..."}))
+
+    except WebSocketDisconnect:
+        print("ESP32 disconnected")
