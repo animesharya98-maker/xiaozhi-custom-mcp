@@ -1,2 +1,6 @@
-mcp<2
+fastapi
+uvicorn[standard]
 websockets
+openai
+duckduckgo-search
+yt-dlp
