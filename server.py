@@ -1,9 +1,23 @@
 import os
 import sys
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import websockets
 from mcp.server.fastmcp import FastMCP
 from duckduckgo_search import DDGS
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
 mcp = FastMCP("IndiaSearch")
 
@@ -45,4 +59,5 @@ if __name__ == "__main__":
     if "--stdio" in sys.argv:
         mcp.run(transport="stdio")
     else:
+        threading.Thread(target=run_dummy_server, daemon=True).start()
         asyncio.run(bridge())
