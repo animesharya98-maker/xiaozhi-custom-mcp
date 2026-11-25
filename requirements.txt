@@ -1,6 +1,3 @@
-fastapi
-uvicorn[standard]
+mcp
 websockets
-openai
 duckduckgo-search
-yt-dlp
